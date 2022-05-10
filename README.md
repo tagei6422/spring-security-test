@@ -75,7 +75,7 @@
 
 
 
-# 开始
+# 开始 Demo01
 
 1. 添加依赖
 
@@ -332,7 +332,7 @@
 
    表单提交了 username 和 password，被封装成 token 进行一系列的认证，便是主要通过这个过滤器完成的
 
-   完成用户的认证
+   完成用户的认证，父类为AbstractAuthenticationProcessingFilter
 
 6. RequestCacheAwareFilter
 
@@ -365,6 +365,360 @@
     决定了访问特定路径应该具备的权限，访问的用户的角色，权限是什么？访问的路径需要什么样的角色和权限？这些判断和处理都是由该类进行的。
 
     FilterSecurityInterceptor 从 SecurityContextHolder 中获取 Authentication 对象，然后比对用户拥有的权限和资源所需的权限
+
+
+
+
+
+# IP_Login Demo02
+
+![https://kirito.iocoder.cn/2011121410543010.jpg](./pic/2011121410543010.jpg)
+
+1. IpAuthenticationProcessingFilter 代替 UsernamePasswordAuthenticationFilter
+2. IpAuthenticationToken 代替 UsernamePasswordAuthenticationToken
+3. ProviderManager 不变
+4. IpAuthenticationProvider 代替 DaoAuthenticationProvider
+5. ConcurrentHashMap 代替 UserDetailsService
+
+
+
+## IpAuthenticationToken
+
+模仿UsernamePasswordAuthenticationFilter写法
+
+```java
+package com.zhj6422.springsecuritytest.entity;
+
+import java.util.Collection;
+import org.springframework.security.authentication.AbstractAuthenticationToken;
+import org.springframework.security.core.GrantedAuthority;
+
+public class IpAuthenticationToken extends AbstractAuthenticationToken {
+
+  private String ip;
+
+  public String getIp() {
+    return ip;
+  }
+
+  public void setIp(String ip) {
+    this.ip = ip;
+  }
+
+  public IpAuthenticationToken(String ip) {
+    super(null);
+    this.ip = ip;
+    super.setAuthenticated(false);// 注意这个构造方法是认证时使用的
+  }
+
+  public IpAuthenticationToken(String ip, Collection<? extends GrantedAuthority> authorities) {
+    super(authorities);
+    this.ip = ip;
+    super.setAuthenticated(true);// 注意这个构造方法是认证成功后使用的
+
+  }
+
+  @Override
+  public Object getCredentials() {
+    return null;
+  }
+
+  @Override
+  public Object getPrincipal() {
+    return this.ip;
+  }
+}
+```
+
+两个构造方法，一个是认证前传给认证器用的，另一个是认证成功后使用的。
+
+
+
+## IpAuthenticationProcessingFilter
+
+```java
+package com.zhj6422.springsecuritytest.filter;
+
+import com.zhj6422.springsecuritytest.entity.IpAuthenticationToken;
+import java.io.IOException;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.web.authentication.AbstractAuthenticationProcessingFilter;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
+
+public class IpAuthenticationProcessingFilter extends AbstractAuthenticationProcessingFilter {
+  // 使用 /ipVerify 该端点进行 ip 认证
+  public IpAuthenticationProcessingFilter() {
+    super(new AntPathRequestMatcher("/ipVerify"));
+  }
+
+  @Override
+  public Authentication attemptAuthentication(HttpServletRequest request, HttpServletResponse response) throws AuthenticationException, IOException, ServletException {
+    // 获取 host 信息
+    String host = request.getRemoteHost();
+    // 交给内部的 AuthenticationManager 去认证，实现解耦
+    return getAuthenticationManager().authenticate(new IpAuthenticationToken(host));
+  }
+}
+
+```
+
+
+
+## IpAuthenticationProvider
+
+维护一个ip白名单，如果请求的是白名单中的ip，则返回一个通过认证的token，如果没有则返回null
+
+```java
+package com.zhj6422.springsecuritytest.provider;
+
+import com.zhj6422.springsecuritytest.entity.IpAuthenticationToken;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+
+public class IpAuthenticationProvider implements AuthenticationProvider {
+  final static Map<String, SimpleGrantedAuthority> ipAuthorityMap = new ConcurrentHashMap();
+  // 维护一个 ip 白名单列表，每个 ip 对应一定的权限
+  static {
+    ipAuthorityMap.put("127.0.0.1", new SimpleGrantedAuthority("ADMIN"));
+    ipAuthorityMap.put("10.236.69.103", new SimpleGrantedAuthority("ADMIN"));
+    ipAuthorityMap.put("10.236.69.104", new SimpleGrantedAuthority("FRIEND"));
+  }
+
+  @Override
+  public Authentication authenticate(Authentication authentication) throws AuthenticationException {
+    IpAuthenticationToken ipAuthenticationToken = (IpAuthenticationToken) authentication;
+    String ip = ipAuthenticationToken.getIp();
+    SimpleGrantedAuthority simpleGrantedAuthority = ipAuthorityMap.get(ip);
+    // 不在白名单列表中
+    if (simpleGrantedAuthority == null) {
+      return null;
+    } else {
+      // 封装权限信息，并且此时身份已经被认证
+      return new IpAuthenticationToken(ip, Arrays.asList(simpleGrantedAuthority));
+    }
+  }
+
+  // 只支持 IpAuthenticationToken 该身份
+  @Override
+  public boolean supports(Class<?> authentication) {
+    return (IpAuthenticationToken.class
+        .isAssignableFrom(authentication));
+  }
+}
+```
+
+
+
+## 修改WebSecurityConfig
+
+```java
+package com.zhj6422.springsecuritytest.config;
+
+import com.zhj6422.springsecuritytest.filter.IpAuthenticationProcessingFilter;
+import com.zhj6422.springsecuritytest.provider.IpAuthenticationProvider;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
+import org.springframework.security.web.authentication.SimpleUrlAuthenticationFailureHandler;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+/*
+* EnableWebSecurity注解使SpringMVC继承了web安全支持
+* */
+@Configuration
+@EnableWebSecurity
+public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
+
+  //ip 认证者配置
+  @Bean
+  IpAuthenticationProvider ipAuthenticationProvider() {
+    return new IpAuthenticationProvider();
+  }
+
+  // 配置封装 ipAuthenticationToken 的过滤器
+  IpAuthenticationProcessingFilter ipAuthenticationProcessingFilter(
+      AuthenticationManager authenticationManager) {
+    IpAuthenticationProcessingFilter ipAuthenticationProcessingFilter = new IpAuthenticationProcessingFilter();
+    // 为过滤器添加认证器
+    ipAuthenticationProcessingFilter.setAuthenticationManager(authenticationManager);
+    // 重写认证失败时的跳转页面
+    ipAuthenticationProcessingFilter.setAuthenticationFailureHandler(new SimpleUrlAuthenticationFailureHandler("/ipLogin?error"));
+    return ipAuthenticationProcessingFilter;
+  }
+
+  // 配置登录端点
+  @Bean
+  LoginUrlAuthenticationEntryPoint loginUrlAuthenticationEntryPoint(){
+    LoginUrlAuthenticationEntryPoint loginUrlAuthenticationEntryPoint = new LoginUrlAuthenticationEntryPoint
+        ("/ipLogin");
+    return loginUrlAuthenticationEntryPoint;
+  }
+
+  @Override
+  protected void configure(HttpSecurity http) throws Exception {
+    http
+        .authorizeRequests()
+        .antMatchers("/", "/home").permitAll()
+        .antMatchers("/ipLogin").permitAll()
+        .anyRequest().authenticated()
+        .and()
+        .logout()
+        .logoutSuccessUrl("/")
+        .permitAll()
+        .and()
+        .exceptionHandling()
+        .accessDeniedPage("/ipLogin")
+        .authenticationEntryPoint(loginUrlAuthenticationEntryPoint())
+    ;
+
+    // 注册 IpAuthenticationProcessingFilter  注意放置的顺序 这很关键
+    http.addFilterBefore(ipAuthenticationProcessingFilter(authenticationManager()), UsernamePasswordAuthenticationFilter.class);
+
+  }
+
+  @Override
+  protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+    // 添加自定义的ipAuthenticationProvider
+    auth.authenticationProvider(ipAuthenticationProvider());
+  }
+}
+```
+
+
+
+## 修改MvcConfig
+
+```java
+package com.zhj6422.springsecuritytest.config;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class MvcConfig implements WebMvcConfigurer {
+
+  @Override
+  public void addViewControllers(ViewControllerRegistry registry) {
+    registry.addViewController("/home").setViewName("home");
+    registry.addViewController("/").setViewName("home");
+    registry.addViewController("/hello").setViewName("hello");
+    registry.addViewController("/ip").setViewName("ipHello");
+    registry.addViewController("/ipLogin").setViewName("ipLogin");
+  }
+}
+
+```
+
+
+
+## 添加html页面
+
+ipHello.html
+
+```html
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:th="http://www.thymeleaf.org"
+      xmlns:sec="http://www.thymeleaf.org/thymeleaf-extras-springsecurity3">
+<head>
+  <title>Hello World!</title>
+</head>
+<body>
+<h1 th:inline="text">Hello IP [[${#httpServletRequest.remoteUser}]]!</h1>
+
+</body>
+</html>
+```
+
+ipLogin.html
+
+```html
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <title>IP Login Example!</title>
+</head>
+<body>
+<div th:if="${param.error}">
+  Invalid IP.
+</div>
+<div th:if="${param.logout}">
+  You have been logged out.
+</div>
+<form th:action="@{/ipVerify}" method="post">
+  <div><input type="submit" value="Sign In by IP"/></div>
+</form>
+</body>
+</html>
+```
+
+
+
+
+
+
+
+
+
+# SpringSecurityFilterChain 加载流程
+
+org.springframework.web.filter.DelegatingFilterProxy
+
+org.springframework.security.web.FilterChainProxy
+
+org.springframework.security.web.SecurityFilterChain
+
+## DelegatingFilterProxy
+
+DelegatingFilterProxy 的逻辑就是为了调用 `private volatile Filter delegate;`
+
+DelegatingFilterProxy 尝试去容器中获取名为 targetBeanName 的类，而 targetBeanName 的默认值便是 Filter 的名称，也就是 springSecurityFilterChain！也就是说，DelegatingFilterProxy 只是名称和 targetBeanName 叫 springSecurityFilterChain，真正容器中的 Bean(name=”springSecurityFilterChain”) 其实另有其人
+
+
+
+## FilterChainProxy 和 SecurityFilterChain
+
+- FilterChainProxy
+
+  FilterChainProxy才是真正的 springSecurityFilterChain
+
+  内部维护了一个 SecurityFilterChain，这个过滤器链才是请求真正对应的过滤器链
+
+  可能同时存在多个安全过滤器链
+
+  每个 request 最多只会经过一个 SecurityFilterChain
+
+- SecurityFilterChain
+
+  SecurityFilterChain 才是真正意义上的 SpringSecurityFilterChain
+
+
+
+## SecurityFilterChain 的注册过程
+
+@EnableWebSecurity和WebSecurityConfigurerAdapter配置，最终追溯到WebSecurity中的performBuild方法，封装
+
+
+
+
 
 
 
